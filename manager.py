@@ -5,6 +5,10 @@ import subprocess
 import atexit
 import sys
 import readline
+import os
+import time
+import threading
+import queue
 
 
 readline.parse_and_bind('tab: complete')
@@ -27,13 +31,30 @@ def add_history(line):
 def save_history():
     readline.write_history_file(HISTORY_PATH)
 
-
 atexit.register(save_history)
 
 
 def cleanup():
+    message_queue.insert_message("exit")
     command_remove("node", "all", 1)
     print("Bye.")
+
+
+class EventList:
+    def __init__(self):
+        self.strings = []
+
+    def insert(self, new_string):
+        self.strings.append(new_string)
+
+    def print_all(self):
+        for string in self.strings:
+            print(string)
+    
+    def clear(self):
+        self.strings = []
+
+event_list = EventList()
 
 class ContainerArray:
     def __init__(self):
@@ -78,12 +99,16 @@ class ContainerArray:
 array_node1 = ContainerArray()
 array_node2 = ContainerArray()
 
-def run_command_no_echo(command):
-    subprocess.run(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def run_command_no_echo(cmd):
+    subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
-def run_command(command):
-    subprocess.run(command, shell=True)
+def run_command_return(cmd):
+    return subprocess.check_output(cmd, shell=True)
+
+
+def run_command(cmd):
+    subprocess.run(cmd, shell=True)
 
 
 def read_config():
@@ -99,6 +124,10 @@ def read_config():
     remote_user = connection.get("remote_user")
     local_interface = network.get("local_interface")
     remote_interface = network.get("remote_interface")
+    throughput_low = network.get("throughput_low")
+    throughput_medium = network.get("throughput_medium")
+    throughput_high = network.get("throughput_high")
+    cal_period = network.get("cal_period")
     priority_cpu_low = priority.get("priority_cpu_low")
     priority_mem_low = priority.get("priority_mem_low")
     priority_cpu_medium = priority.get("priority_cpu_medium")
@@ -110,7 +139,7 @@ def read_config():
     return {"remote_host": remote_host, "remote_user": remote_user, "local_interface": local_interface, "remote_interface": remote_interface, \
             "priority_cpu_low": priority_cpu_low, "priority_mem_low": priority_mem_low, "priority_cpu_medium": priority_cpu_medium, \
             "priority_mem_medium": priority_mem_medium, "priority_cpu_high": priority_cpu_high, "priority_mem_high": priority_mem_high, \
-            "image": image}
+            "image": image, "cal_period": cal_period, "throughput_low": throughput_low, "throughput_medium": throughput_medium, "throughput_high": throughput_high}
 
 
 def get_input():
@@ -159,10 +188,15 @@ def get_input():
             print("See '?' or 'help'")
             
         elif user_input == "exit" or user_input == "quit":
+            message_queue.insert_message("exit")
             sys.exit(0)
             
         elif user_input == "help" or user_input == "?":
             print_help()
+            
+        elif user_input == "test":
+            return {"command": "test"}
+            
         else:
             print("'{}' is not a command.".format(user_input))
             print("See '?' or 'help'")
@@ -323,9 +357,10 @@ def command_show(content):
     run_command(remote_command)
 
 
-def command_migrate(src, dst, name):
+def command_migrate(src, dst, name, PRINT):
     if src == dst:
-        print("src and dst is the same node")
+        if PRINT == 1:
+            print("src and dst is the same node")
     else:
         ret = check_existence(name)
         if ret == 1:
@@ -333,22 +368,185 @@ def command_migrate(src, dst, name):
                 priority = array_node1.get_priority_by_name(name)
                 command_remove("container", name, 0)
                 command_deploy(priority, "2", name, 0)
-                print("Container [{}] migrates from node [1] to node [2].".format(name))
+                if PRINT == 1:
+                    print("Container [{}] migrates from node [1] to node [2].".format(name))
             elif src == "2":
-                print("Container [{}] exists on node [1].".format(name))
+                if PRINT == 1:
+                    print("Container [{}] exists on node [1].".format(name))
         elif ret == 2:
             if src == "2" and dst == "1":
                 priority = array_node2.get_priority_by_name(name)
                 command_remove("container", name, 0)
                 command_deploy(priority, "1", name, 0)
-                print("Container [{}] migrates from node [2] to node [1].".format(name))
+                if PRINT == 1:
+                    print("Container [{}] migrates from node [2] to node [1].".format(name))
             elif src == "1":
-                print("Container [{}] exists on node [2].".format(name))
+                if PRINT == 1:
+                    print("Container [{}] exists on node [2].".format(name))
         else:
-            print("Container [{}] dose not exist.".format(name))
+            if PRINT == 1:
+                print("Container [{}] dose not exist.".format(name))
 
 
+last_rx_packets = [0, 0]
+
+def calculate_rx_rate():
+    global last_rx_packets
+    
+    while True:
+        with open(f"/sys/class/net/{local_interface}/statistics/rx_packets", "r") as f:
+            local_rx_packets = int(f.read().strip())
+
+        cmd = f"ssh {remote_user}@{remote_host} cat /sys/class/net/{remote_interface}/statistics/rx_packets"
+        proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, _ = proc.communicate()
+        remote_rx_packets = int(stdout.decode().strip())
+
+        local_rx_rate = local_rx_packets - last_rx_packets[0]
+        remote_rx_rate = remote_rx_packets - last_rx_packets[1]
+
+        last_rx_packets[0] = local_rx_packets
+        last_rx_packets[1] = remote_rx_packets
+
+        yield (local_rx_rate, remote_rx_rate)
+
+        time.sleep(cal_period)
+
+
+last_event = -1
+name1 = "service_enrty_A"
+name2 = "service_entry_B"
+
+def handle_event5(event):
+    global last_event
+    if last_event == 5:
+        # command_remove("container", name2, 0)
+        message_queue.insert_message("remove container " + name2 + " 0")
+        return event + f" [{name2}] has been removed from node [1]."
+    else:
+        return event
+
+def deploy_strategy(local_rx_rate, remote_rx_rate, time):
+    global last_event
+    event = ""
+    if (remote_rx_rate != 0) ^ (local_rx_rate != 0):
+        if (last_event != 0) and (remote_rx_rate > 0) and (remote_rx_rate < throughput_low):
+            # command_migrate("1", "2", name1, 0)
+            message_queue.insert_message("migrate 1 2 " + name1 + " 0")
+            # command_deploy("low", "2", name1, 0)
+            message_queue.insert_message("deploy low 2 " + name1 + " 0")
+            event = f"Event@{time}s: [{name1}] has been deployed on node [2] with priority [low]."
+            event = handle_event5(event)
+            last_event = 0
+        if (last_event != 1) and (remote_rx_rate > throughput_low) and (remote_rx_rate < throughput_medium):
+            # command_migrate("1", "2", name1, 0)
+            message_queue.insert_message("migrate 1 2 " + name1 + " 0")
+            # command_deploy("medium", "2", name1, 0)
+            message_queue.insert_message("deploy medium 2 " + name1 + " 0")
+            event =  f"Event@{time}s: [{name1}] has been deployed on node [2] with priority [medium]."
+            event = handle_event5(event)
+            last_event = 1
+        if (last_event != 2) and (local_rx_rate > 0) and (local_rx_rate < throughput_low):
+            # command_migrate("2", "1", name1, 0)
+            message_queue.insert_message("migrate 2 1 " + name1 + " 0")
+            # command_deploy("low", "1", name1, 0)
+            message_queue.insert_message("deploy low 1 " + name1 + " 0")
+            event = f"Event@{time}s: [{name1}] has been deployed on node [1] with priority [low]."
+            event = handle_event5(event)
+            last_event = 2
+        if (last_event != 3) and (local_rx_rate > throughput_low) and (local_rx_rate < throughput_medium):
+            # command_migrate("2", "1", name1, 0)
+            message_queue.insert_message("migrate 2 1 " + name1 + " 0")
+            # command_deploy("medium", "1", name1, 0)
+            message_queue.insert_message("deploy medium 1 " + name1 + " 0")
+            event = f"Event@{time}s: [{name1}] has been deployed on node [1] with priority [medium]."
+            event = handle_event5(event)
+            last_event = 3
+        if (last_event != 4) and (local_rx_rate > throughput_medium) and (local_rx_rate < throughput_high):
+            # command_migrate("2", "1", name1, 0)
+            message_queue.insert_message("migrate 2 1 " + name1 + " 0")
+            # command_deploy("high", "1", name1, 0)
+            message_queue.insert_message("deploy high 1 " + name1 + " 0")
+            event = f"Event@{time}s: [{name1}] has been deployed on node [1] with priority [high]."
+            event = handle_event5(event)
+            last_event = 4
+        if (last_event != 5) and (local_rx_rate > throughput_high):
+            # command_migrate("2", "1", name1, 0)
+            message_queue.insert_message("migrate 2 1 " + name1 + " 0")
+            # command_deploy("high", "1", name1, 0)
+            message_queue.insert_message("deploy high 1 " + name1 + " 0")
+            # command_deploy("high", "1", name2, 0)
+            message_queue.insert_message("deploy high 1 " + name2 + " 0")
+            event = f"Event@{time}s: [{name1}] and [{name2}] have been deployed on node [1] with priority [high]."
+            last_event = 5
+            
+    if event != "":
+        event_list.insert(event)
+    
+
+
+def command_deploy_auto():
+    rx_rate_generator = calculate_rx_rate()
+    time_elapsed = 0
+    
+    while True:
+        try:
+            local_rx_rate, remote_rx_rate = next(rx_rate_generator)
+            time_elapsed += cal_period
+            os.system('clear')
+            print("Automatically adjust the deployment of containers based on network throughput")
+            print("Type 'Ctrl + C' to quit.")
+            print(f"\nTime elapsed: {time_elapsed} s")
+            print(f"Node [1] RX rate: {local_rx_rate} pps")
+            print(f"Node [2] RX rate: {remote_rx_rate} pps")
+            event_list.print_all()
+            deploy_strategy(local_rx_rate, remote_rx_rate, time_elapsed)
+        except KeyboardInterrupt:
+            event_list.clear()
+            break;
+            
+
+
+class MessageQueue:
+    def __init__(self):
+        self.queue = queue.Queue()
+
+    def insert_message(self, message):
+        self.queue.put(message)
+
+    def process_messages(self):
+        while True:
+            message = self.queue.get()
+            args = message.split()
+            if args[0] == "deploy":
+                if len(args) == 5:
+                    command_deploy(args[1], args[2], args[3], int(args[4]))
+                else:
+                    print("wrong msg")
+            elif args[0] == "migrate":
+                if len(args) == 5:
+                    command_migrate(args[1], args[2], args[3], int(args[4]))
+                else:
+                    print("wrong msg")
+            elif args[0] == "remove":
+                if len(args) == 4:
+                    command_remove(args[1], args[2], int(args[3]))
+                else:
+                    print("wrong msg")
+            elif args[0] == "exit":
+                break
+
+message_queue = MessageQueue()
+
+
+########################################
 ############## main logic ##############
+########################################
+
+rx_pkt_local_last = 0
+rx_pkt_local_cur = 0
+rx_pkt_remote_last = 0
+rx_pkt_remote_cur = 0
 
 config = read_config()
 remote_host = config["remote_host"]
@@ -362,10 +560,17 @@ priority_mem_medium = config["priority_mem_medium"]
 priority_cpu_high = config["priority_cpu_high"]
 priority_mem_high = config["priority_mem_high"]
 image = config["image"]
+cal_period = int(config["cal_period"])
+throughput_low = int(config["throughput_low"])
+throughput_medium = int(config["throughput_medium"])
+throughput_high = int(config["throughput_high"])
 
 atexit.register(cleanup)
 
 print_welcome()
+
+t = threading.Thread(target=message_queue.process_messages)
+t.start()
 
 while True:
     
@@ -375,15 +580,24 @@ while True:
     
     if user_input["command"] == "deploy":
         command_deploy(user_input["priority"], user_input["node"], user_input["name"], 1)
+        # message_queue.insert_message("deploy "+user_input["priority"]+" "+user_input["node"]+" "+user_input["name"]+" 1")
         
     elif user_input["command"] == "migrate":
-        command_migrate(user_input["src"], user_input["dst"], user_input["name"])
-    
+        command_migrate(user_input["src"], user_input["dst"], user_input["name"], 1)
+        # message_queue.insert_message("migrate "+user_input["src"]+" "+user_input["dst"]+" "+user_input["name"]+" 1")
+        
     elif user_input["command"] == "deploy_auto":
-        print("Not implemented")
+        command_deploy_auto()
     
     elif user_input["command"] == "show":
         command_show(user_input["content"])
         
     elif user_input["command"] == "remove":
         command_remove(user_input["scope"], user_input["name"], 1)
+        # message_queue.insert_message("remove "+user_input["scope"]+" "+user_input["name"]+" 1")
+        
+    elif user_input["command"] == "test":
+        message_queue.insert_message("migrate 2 1 " + name1 + " 1")
+            # command_deploy("low", "1", name1, 0)
+        message_queue.insert_message("deploy low 1 " + name1 + " 1")
+        pass
