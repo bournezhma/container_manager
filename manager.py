@@ -9,6 +9,7 @@ import os
 import time
 import threading
 import queue
+import datetime
 
 
 readline.parse_and_bind('tab: complete')
@@ -389,15 +390,23 @@ def command_migrate(src, dst, name, PRINT):
 
 
 last_rx_packets = [0, 0]
+first_cal = 1
 
 def calculate_rx_rate():
     global last_rx_packets
+    global first_cal
     
     while True:
-        with open(f"/sys/class/net/{local_interface}/statistics/rx_packets", "r") as f:
+        
+        local_file = f"/sys/class/net/{local_interface}/statistics/rx_packets"
+        remote_file = f"/sys/class/net/{remote_interface}/statistics/rx_packets"
+        # local_file = "/home/mzh/local_speed"
+        # remote_file = "/home/mzh/remote_speed"
+        
+        with open(local_file, "r") as f:
             local_rx_packets = int(f.read().strip())
 
-        cmd = f"ssh {remote_user}@{remote_host} cat /sys/class/net/{remote_interface}/statistics/rx_packets"
+        cmd = f"ssh {remote_user}@{remote_host} cat {remote_file}"
         proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, _ = proc.communicate()
         remote_rx_packets = int(stdout.decode().strip())
@@ -408,13 +417,18 @@ def calculate_rx_rate():
         last_rx_packets[0] = local_rx_packets
         last_rx_packets[1] = remote_rx_packets
 
+        if first_cal == 1:
+            local_rx_rate = 0
+            remote_rx_rate = 0
+            first_cal = 0
+        
         yield (local_rx_rate, remote_rx_rate)
 
         time.sleep(cal_period)
 
 
 last_event = -1
-name1 = "service_enrty_A"
+name1 = "service_entry_A"
 name2 = "service_entry_B"
 
 def handle_event5(event):
@@ -422,7 +436,7 @@ def handle_event5(event):
     if last_event == 5:
         # command_remove("container", name2, 0)
         message_queue.insert_message("remove container " + name2 + " 0")
-        return event + f" [{name2}] has been removed from node [1]."
+        return event + f"\n           [{name2}] has been removed from node [1]."
     else:
         return event
 
@@ -430,44 +444,44 @@ def deploy_strategy(local_rx_rate, remote_rx_rate, time):
     global last_event
     event = ""
     if (remote_rx_rate != 0) ^ (local_rx_rate != 0):
-        if (last_event != 0) and (remote_rx_rate > 0) and (remote_rx_rate < throughput_low):
+        if (last_event != 0) and (remote_rx_rate > 0) and (remote_rx_rate <= throughput_low):
             # command_migrate("1", "2", name1, 0)
             message_queue.insert_message("migrate 1 2 " + name1 + " 0")
             # command_deploy("low", "2", name1, 0)
             message_queue.insert_message("deploy low 2 " + name1 + " 0")
-            event = f"Event@{time}s: [{name1}] has been deployed on node [2] with priority [low]."
+            event = f"Event@\t{time}s: [{name1}] has been deployed on node [2] with priority [low]."
             event = handle_event5(event)
             last_event = 0
-        if (last_event != 1) and (remote_rx_rate > throughput_low) and (remote_rx_rate < throughput_medium):
+        if (last_event != 1) and (remote_rx_rate > throughput_low) and (remote_rx_rate <= throughput_medium):
             # command_migrate("1", "2", name1, 0)
             message_queue.insert_message("migrate 1 2 " + name1 + " 0")
             # command_deploy("medium", "2", name1, 0)
             message_queue.insert_message("deploy medium 2 " + name1 + " 0")
-            event =  f"Event@{time}s: [{name1}] has been deployed on node [2] with priority [medium]."
+            event =  f"Event@\t{time}s: [{name1}] has been deployed on node [2] with priority [medium]."
             event = handle_event5(event)
             last_event = 1
-        if (last_event != 2) and (local_rx_rate > 0) and (local_rx_rate < throughput_low):
+        if (last_event != 2) and (local_rx_rate > 0) and (local_rx_rate <= throughput_low):
             # command_migrate("2", "1", name1, 0)
             message_queue.insert_message("migrate 2 1 " + name1 + " 0")
             # command_deploy("low", "1", name1, 0)
             message_queue.insert_message("deploy low 1 " + name1 + " 0")
-            event = f"Event@{time}s: [{name1}] has been deployed on node [1] with priority [low]."
+            event = f"Event@\t{time}s: [{name1}] has been deployed on node [1] with priority [low]."
             event = handle_event5(event)
             last_event = 2
-        if (last_event != 3) and (local_rx_rate > throughput_low) and (local_rx_rate < throughput_medium):
+        if (last_event != 3) and (local_rx_rate > throughput_low) and (local_rx_rate <= throughput_medium):
             # command_migrate("2", "1", name1, 0)
             message_queue.insert_message("migrate 2 1 " + name1 + " 0")
             # command_deploy("medium", "1", name1, 0)
             message_queue.insert_message("deploy medium 1 " + name1 + " 0")
-            event = f"Event@{time}s: [{name1}] has been deployed on node [1] with priority [medium]."
+            event = f"Event@\t{time}s: [{name1}] has been deployed on node [1] with priority [medium]."
             event = handle_event5(event)
             last_event = 3
-        if (last_event != 4) and (local_rx_rate > throughput_medium) and (local_rx_rate < throughput_high):
+        if (last_event != 4) and (local_rx_rate > throughput_medium) and (local_rx_rate <= throughput_high):
             # command_migrate("2", "1", name1, 0)
             message_queue.insert_message("migrate 2 1 " + name1 + " 0")
             # command_deploy("high", "1", name1, 0)
             message_queue.insert_message("deploy high 1 " + name1 + " 0")
-            event = f"Event@{time}s: [{name1}] has been deployed on node [1] with priority [high]."
+            event = f"Event@\t{time}s: [{name1}] has been deployed on node [1] with priority [high]."
             event = handle_event5(event)
             last_event = 4
         if (last_event != 5) and (local_rx_rate > throughput_high):
@@ -477,7 +491,7 @@ def deploy_strategy(local_rx_rate, remote_rx_rate, time):
             message_queue.insert_message("deploy high 1 " + name1 + " 0")
             # command_deploy("high", "1", name2, 0)
             message_queue.insert_message("deploy high 1 " + name2 + " 0")
-            event = f"Event@{time}s: [{name1}] and [{name2}] have been deployed on node [1] with priority [high]."
+            event = f"Event@\t{time}s: [{name1}] and [{name2}] have been deployed on node [1] with priority [high]."
             last_event = 5
             
     if event != "":
@@ -488,13 +502,15 @@ def deploy_strategy(local_rx_rate, remote_rx_rate, time):
 def command_deploy_auto():
     rx_rate_generator = calculate_rx_rate()
     time_elapsed = 0
+    global first_cal
+    first_cal = 1
     
     while True:
         try:
             local_rx_rate, remote_rx_rate = next(rx_rate_generator)
             time_elapsed += cal_period
             os.system('clear')
-            print("Automatically adjust the deployment of containers based on network throughput")
+            print("Automatically adjust the deployment of containers based on network throughput.")
             print("Type 'Ctrl + C' to quit.")
             print(f"\nTime elapsed: {time_elapsed} s")
             print(f"Node [1] RX rate: {local_rx_rate} pps")
@@ -502,6 +518,9 @@ def command_deploy_auto():
             event_list.print_all()
             deploy_strategy(local_rx_rate, remote_rx_rate, time_elapsed)
         except KeyboardInterrupt:
+            message_queue.insert_message("remove container {name1} 1")
+            message_queue.insert_message("remove container {name2} 1")
+            last_event = -1
             event_list.clear()
             break;
             
@@ -578,10 +597,11 @@ while True:
     if user_input == -1:
         continue
     
-    if user_input["command"] == "deploy":
+    start_time = datetime.datetime.now()
+    if user_input["command"] == "deploy":   
         command_deploy(user_input["priority"], user_input["node"], user_input["name"], 1)
         # message_queue.insert_message("deploy "+user_input["priority"]+" "+user_input["node"]+" "+user_input["name"]+" 1")
-        
+    
     elif user_input["command"] == "migrate":
         command_migrate(user_input["src"], user_input["dst"], user_input["name"], 1)
         # message_queue.insert_message("migrate "+user_input["src"]+" "+user_input["dst"]+" "+user_input["name"]+" 1")
@@ -600,4 +620,11 @@ while True:
         message_queue.insert_message("migrate 2 1 " + name1 + " 1")
             # command_deploy("low", "1", name1, 0)
         message_queue.insert_message("deploy low 1 " + name1 + " 1")
-        pass
+
+
+    end_time = datetime.datetime.now()
+    elapsed_time = end_time - start_time
+    elapsed_microseconds = int(elapsed_time.total_seconds() * 1000000)
+    elapsed_time_str = f"{elapsed_microseconds // 1000000}.{elapsed_microseconds % 1000000:06d}"
+    
+    print(f"\ntime elapsed: {elapsed_time_str} s")
